@@ -93,7 +93,7 @@ Commit `Dockerfile` / `.dockerignore` and push to GitHub/GitLab.
 
 1. Project → **Create Service** → **Application**
 2. **Source**: your Git repo + branch
-3. **Build Type**: **Dockerfile** (not Nixpacks)
+3. **Build Type**: **Dockerfile** (not Nixpacks) — Nixpacks defaults to Node 18, which cannot install `better-sqlite3@12`
 4. Dockerfile path: `Dockerfile`
 
 ### 3. Environment variables

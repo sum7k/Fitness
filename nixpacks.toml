@@ -1,0 +1,9 @@
+# Fallback if the host builds with Nixpacks instead of the Dockerfile.
+# Prefer Build Type = Dockerfile on Dokploy (see README) — that image already
+# includes Node 22, ffmpeg, and the better-sqlite3 compile toolchain.
+
+[variables]
+NIXPACKS_NODE_VERSION = "22"
+
+[phases.setup]
+nixPkgs = ["...", "python311", "gcc", "ffmpeg"]
