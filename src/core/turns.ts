@@ -4,7 +4,7 @@ export interface EntryChip {
   id: number;
   kind: string;
   name: string;
-  size: string;
+  kcal: number;
   confidence: string | null;
 }
 
@@ -21,6 +21,6 @@ export type TurnKind =
 export interface BotTurn {
   text: string;
   kind: TurnKind;
-  /** Present when this turn is an entry line with size-correction chips. */
+  /** Present when this turn is an entry line with kcal-correction chips. */
   entry?: EntryChip;
 }

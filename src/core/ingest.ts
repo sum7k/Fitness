@@ -1,9 +1,8 @@
 import { db, dayLocal, normalizeName, type User } from "../db/index.js";
 import { extract, type Extraction } from "../llm/extract.js";
-import { applySizing } from "../domain/sizing.js";
-import { computeTally, tallyLine } from "../domain/tally.js";
+import { resolveKcal } from "../domain/kcal.js";
+import { computeTally, tallyLine, todayEntries, entryKcal, formatKcal } from "../domain/tally.js";
 import { buddyReply } from "../llm/buddy.js";
-import { SIZE_KCAL_MID, type Size } from "../domain/sizes.js";
 import { debug, error } from "../log.js";
 import type { BotTurn } from "./turns.js";
 
@@ -12,17 +11,13 @@ type InputPart = Parameters<typeof extract>[0][number];
 export function entryLine(
   kind: string,
   name: string,
-  size: string,
+  kcal: number,
   confidence: string | null,
 ): string {
   const icon = kind === "food" ? "🍽" : "🏃";
   const unsure = confidence === "low" ? " 🤔" : "";
   const suffix = kind === "exercise" ? " earned" : "";
-  return `${icon} ${name} — ${size}${suffix}${unsure}`;
-}
-
-export function kcalMidFor(size: string): number {
-  return SIZE_KCAL_MID[size as Size] ?? 200;
+  return `${icon} ${name} — ~${formatKcal(kcal)} kcal${suffix}${unsure}`;
 }
 
 export async function ingestParts(
@@ -39,9 +34,13 @@ export async function ingestParts(
     hour12: false,
   });
 
+  const loggedToday = todayEntries(user).map(
+    (e) => `${e.name} (~${entryKcal(e)} kcal)`,
+  );
+
   let extraction: Extraction;
   try {
-    extraction = await extract(parts, localTime);
+    extraction = await extract(parts, localTime, loggedToday);
   } catch (err) {
     error("extraction failed:", err);
     return [{ text: "Couldn't process that one — try again?", kind: "error" }];
@@ -50,7 +49,7 @@ export async function ingestParts(
   debug(`transcript (${source}): "${extraction.transcript}"`);
   debug(
     `extracted: intent=${extraction.intent}, ` +
-      `entries=[${extraction.entries.map((e) => `${e.name}:${e.size}${e.confidence === "low" ? "?" : ""}`).join(", ")}], ` +
+      `entries=[${extraction.entries.map((e) => `${e.name}:${e.kcal_estimate}kcal${e.confidence === "low" ? "?" : ""}`).join(", ")}], ` +
       `weight=${extraction.weight_kg ?? "-"}, chat=${extraction.chat_text ? `"${extraction.chat_text.slice(0, 60)}"` : "-"}`,
   );
 
@@ -64,36 +63,36 @@ export async function ingestParts(
   }
 
   const insert = db.prepare(
-    `INSERT INTO entries (user_id, kind, name, name_normalized, size, kcal_estimate,
+    `INSERT INTO entries (user_id, kind, name, name_normalized, kcal_estimate,
                           meal_slot, confidence, source, day_local)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
   for (const raw of extraction.entries) {
-    const entry = applySizing(user, raw);
-    if (entry.sizeSource !== "llm" || entry.size !== raw.size) {
-      debug(`sizing "${raw.name}": ${raw.size} → ${entry.size} (${entry.sizeSource})`);
+    const entry = resolveKcal(user, raw);
+    if (entry.kcalSource !== "llm") {
+      debug(`kcal "${raw.name}": ${raw.kcal_estimate} → ${entry.kcal_estimate} (${entry.kcalSource})`);
     }
     const result = insert.run(
-      user.id, entry.kind, entry.name, normalizeName(entry.name), entry.size,
-      entry.kcal_estimate, entry.meal_slot, entry.confidence, source, dayLocal(user.tz),
+      user.id, entry.kind, entry.name, normalizeName(entry.name), entry.kcal_estimate,
+      entry.meal_slot, entry.confidence, source, dayLocal(user.tz),
     );
     const entryId = Number(result.lastInsertRowid);
+    const kcal = Math.round(entry.kcal_estimate);
     turns.push({
-      text: entryLine(entry.kind, entry.name, entry.size, entry.confidence),
+      text: entryLine(entry.kind, entry.name, kcal, entry.confidence),
       kind: "entry",
       entry: {
         id: entryId,
         kind: entry.kind,
         name: entry.name,
-        size: entry.size,
+        kcal,
         confidence: entry.confidence,
       },
     });
   }
 
   if (extraction.entries.length > 0) {
-    // Refresh user in case weight was updated above
     const fresh = db.prepare("SELECT * FROM users WHERE id = ?").get(user.id) as User;
     turns.push({ text: tallyLine(computeTally(fresh)), kind: "tally" });
   }

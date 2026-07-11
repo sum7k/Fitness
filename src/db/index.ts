@@ -34,8 +34,7 @@ CREATE TABLE IF NOT EXISTS entries (
   kind TEXT NOT NULL,        -- food | exercise
   name TEXT NOT NULL,
   name_normalized TEXT NOT NULL,
-  size TEXT NOT NULL,
-  kcal_estimate REAL,
+  kcal_estimate REAL NOT NULL,
   meal_slot TEXT,
   confidence TEXT,
   source TEXT NOT NULL,      -- voice | photo | text
@@ -55,16 +54,14 @@ CREATE TABLE IF NOT EXISTS weights (
 CREATE TABLE IF NOT EXISTS overrides (
   user_id INTEGER NOT NULL REFERENCES users(id),
   name_normalized TEXT NOT NULL,
-  size TEXT NOT NULL,
-  kcal_estimate REAL,
+  kcal_estimate REAL NOT NULL,
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (user_id, name_normalized)
 );
 
-CREATE TABLE IF NOT EXISTS size_cache (
+CREATE TABLE IF NOT EXISTS kcal_cache (
   name_normalized TEXT PRIMARY KEY,
-  size TEXT NOT NULL,
-  kcal_estimate REAL,
+  kcal_estimate REAL NOT NULL,
   model TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -78,7 +75,8 @@ CREATE TABLE IF NOT EXISTS chat_log (
 );
 `);
 
-// Migrations for DBs created before the Mifflin-St Jeor columns existed.
+// ---- migrations for older DBs ----
+
 {
   const cols = new Set(
     (db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((c) => c.name),
@@ -94,6 +92,60 @@ CREATE TABLE IF NOT EXISTS chat_log (
   ];
   for (const [name, decl] of adds) {
     if (!cols.has(name)) db.exec(`ALTER TABLE users ADD COLUMN ${name} ${decl}`);
+  }
+}
+
+// Drop legacy t-shirt `size` columns; backfill kcal from size midpoints first.
+{
+  const SIZE_MID: Record<string, number> = {
+    XS: 50, S: 100, M: 200, L: 400, XL: 600, XXL: 800, XXXL: 1200,
+  };
+
+  const entryCols = new Set(
+    (db.prepare("PRAGMA table_info(entries)").all() as Array<{ name: string }>).map((c) => c.name),
+  );
+  if (entryCols.has("size")) {
+    const rows = db
+      .prepare("SELECT id, size, kcal_estimate FROM entries")
+      .all() as Array<{ id: number; size: string; kcal_estimate: number | null }>;
+    const upd = db.prepare("UPDATE entries SET kcal_estimate = ? WHERE id = ?");
+    for (const r of rows) {
+      if (r.kcal_estimate == null || !Number.isFinite(r.kcal_estimate)) {
+        upd.run(SIZE_MID[r.size] ?? 200, r.id);
+      }
+    }
+    db.exec("UPDATE entries SET kcal_estimate = 200 WHERE kcal_estimate IS NULL");
+    db.exec("ALTER TABLE entries DROP COLUMN size");
+  }
+
+  const overrideCols = new Set(
+    (db.prepare("PRAGMA table_info(overrides)").all() as Array<{ name: string }>).map((c) => c.name),
+  );
+  if (overrideCols.has("size")) {
+    db.exec("UPDATE overrides SET kcal_estimate = 200 WHERE kcal_estimate IS NULL");
+    // Drop size; keep rows that have kcal.
+    db.exec("ALTER TABLE overrides DROP COLUMN size");
+  }
+
+  // size_cache → kcal_cache
+  const tables = new Set(
+    (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>)
+      .map((t) => t.name),
+  );
+  if (tables.has("size_cache")) {
+    db.exec(`
+      INSERT OR IGNORE INTO kcal_cache (name_normalized, kcal_estimate, model, created_at)
+      SELECT name_normalized,
+             COALESCE(kcal_estimate,
+               CASE size
+                 WHEN 'XS' THEN 50 WHEN 'S' THEN 100 WHEN 'M' THEN 200
+                 WHEN 'L' THEN 400 WHEN 'XL' THEN 600 WHEN 'XXL' THEN 800
+                 WHEN 'XXXL' THEN 1200 ELSE 200 END),
+             model, created_at
+      FROM size_cache
+      WHERE name_normalized IS NOT NULL
+    `);
+    db.exec("DROP TABLE size_cache");
   }
 }
 
@@ -121,8 +173,7 @@ export interface Entry {
   kind: "food" | "exercise";
   name: string;
   name_normalized: string;
-  size: string;
-  kcal_estimate: number | null;
+  kcal_estimate: number;
   meal_slot: string | null;
   confidence: string | null;
   source: string;

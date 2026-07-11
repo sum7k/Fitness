@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/main.ts",
-    "typecheck": "tsc --noEmit"
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "sim": "tsx scripts/sim.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",

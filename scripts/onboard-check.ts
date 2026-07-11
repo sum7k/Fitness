@@ -3,9 +3,18 @@
 //    contains user B's data, even when A's own messages are adversarial.
 //  - applyUpdates-style writes hit only the target user id.
 //  - the budget math clamps unsafe proposals (rate cap + safe floor).
-import { db } from "../src/db/index.js";
-import { buildOnboardMessages } from "../src/llm/onboard.js";
-import { clampRateKgWk, baseEnergy, budgetFor, rateToDailyAdjust, bmi } from "../src/domain/energy.js";
+import { rmSync } from "node:fs";
+
+// Throwaway DB — env must be set before the db module loads, hence dynamic imports.
+process.env.DB_PATH = "data/check.db";
+process.env.TELEGRAM_BOT_TOKEN ??= "check-unused";
+for (const suffix of ["", "-wal", "-shm"]) rmSync(`data/check.db${suffix}`, { force: true });
+
+const { db } = await import("../src/db/index.js");
+const { buildOnboardMessages } = await import("../src/llm/onboard.js");
+const { clampRateKgWk, baseEnergy, budgetFor, rateToDailyAdjust, bmi } = await import(
+  "../src/domain/energy.js"
+);
 
 let failed = 0;
 const ok = (name: string, cond: boolean) => {

@@ -1,19 +1,19 @@
-import { Bot, type Context } from "grammy";
+import { Bot } from "grammy";
 import { config } from "../config.js";
-import { db, getOrCreateUser, dayLocal, type Entry } from "../db/index.js";
+import { db, getOrCreateUser, type Entry } from "../db/index.js";
 import { startOnboarding, handleOnboarding } from "./onboarding.js";
 import type { OnboardInputPart } from "../llm/onboard.js";
-import { ingest, voiceToParts, photoToParts, entryKeyboard, entryLine, kcalMidFor } from "./ingest.js";
-import { saveOverride } from "../domain/sizing.js";
-import { computeTally, tallyLine, formatUnits, currentStreak, todayEntries } from "../domain/tally.js";
-import { isSize } from "../domain/sizes.js";
+import { ingest, voiceToParts, photoToParts, entryKeyboard, replyTurns } from "./ingest.js";
 import {
-  baseEnergy, safeFloorKcal, parseBudgetArg, unitsToKcal, hasEnergyProfile,
-  type Sex, type Activity,
-} from "../domain/energy.js";
+  cmdHelp, cmdToday, cmdStreak, cmdUndo, cmdBudget,
+  adjustEntryKcal, deleteEntry,
+} from "../core/commands.js";
 import { debug, error } from "../log.js";
 
 export function createBot(): Bot {
+  if (!config.botToken) {
+    throw new Error("Missing env var: TELEGRAM_BOT_TOKEN");
+  }
   const bot = new Bot(config.botToken);
 
   bot.use(async (ctx, next) => {
@@ -37,96 +37,24 @@ export function createBot(): Bot {
   });
 
   bot.command("help", async (ctx) => {
-    await ctx.reply(
-      "Talk to me like a friend:\n" +
-        '🎤 "had poha and chai" — logs food\n' +
-        '🎤 "ran 5k this morning" — logs exercise\n' +
-        '🎤 "weighed 81.5" — logs weight\n' +
-        "📷 photo of your plate — I'll size it\n" +
-        '💬 "why am I not losing weight?" — I\'ll look at your data\n\n' +
-        "Narrate a whole day at once, that works too.\n\n" +
-        "/today — today's log and budget\n/budget — view or set your daily target\n/streak — logging streak\n/undo — remove last entry",
-    );
+    await replyTurns(ctx, cmdHelp());
   });
 
   bot.command("today", async (ctx) => {
-    const user = getOrCreateUser(ctx.from!.id);
-    const entries = todayEntries(user);
-    if (entries.length === 0) {
-      await ctx.reply("Nothing logged today yet. Tell me what you've eaten.");
-      return;
-    }
-    const lines = entries.map((e) => entryLine(e.kind, e.name, e.size, null));
-    await ctx.reply(`${lines.join("\n")}\n\n${tallyLine(computeTally(user))}`);
+    await replyTurns(ctx, cmdToday(getOrCreateUser(ctx.from!.id)));
   });
 
   bot.command("streak", async (ctx) => {
-    const user = getOrCreateUser(ctx.from!.id);
-    const streak = currentStreak(user);
-    await ctx.reply(
-      streak === 0
-        ? "No streak yet — log one thing today and it starts."
-        : `🔥 ${streak} day${streak === 1 ? "" : "s"} logging streak. Showing up is the whole game.`,
-    );
+    await replyTurns(ctx, cmdStreak(getOrCreateUser(ctx.from!.id)));
   });
 
   bot.command("undo", async (ctx) => {
-    const user = getOrCreateUser(ctx.from!.id);
-    const last = db
-      .prepare("SELECT * FROM entries WHERE user_id = ? AND day_local = ? ORDER BY id DESC LIMIT 1")
-      .get(user.id, dayLocal(user.tz)) as Entry | undefined;
-    if (!last) {
-      await ctx.reply("Nothing to undo today.");
-      return;
-    }
-    db.prepare("DELETE FROM entries WHERE id = ?").run(last.id);
-    await ctx.reply(`Removed: ${last.name} (${last.size}).\n${tallyLine(computeTally(user))}`);
+    await replyTurns(ctx, cmdUndo(getOrCreateUser(ctx.from!.id)));
   });
 
   bot.command("budget", async (ctx) => {
-    const user = getOrCreateUser(ctx.from!.id);
     const arg = ctx.match?.toString().trim() ?? "";
-
-    // Compute the user's energy picture if we have a full profile.
-    const energy = hasEnergyProfile(user)
-      ? baseEnergy({
-          weight_kg: user.weight_kg!,
-          height_cm: user.height_cm!,
-          age: user.age!,
-          sex: user.sex as Sex,
-          activity: user.activity as Activity,
-        })
-      : null;
-    const floor = user.sex ? safeFloorKcal(user.sex as Sex) : null;
-
-    if (!arg) {
-      if (user.daily_budget_units == null) {
-        await ctx.reply("No budget set yet — run /start to set one up.");
-        return;
-      }
-      const lines = [
-        `Daily budget: ~${formatUnits(user.daily_budget_units)} M (≈ ${unitsToKcal(user.daily_budget_units)} kcal). Exercise earns more back.`,
-      ];
-      if (energy) {
-        lines.push(`Your maintenance ≈ ${energy.tdee} kcal/day; resting burn ≈ ${energy.bmr} kcal.`);
-      }
-      lines.push("Set your own: /budget 1900  (calories) or /budget 10M (sizes).");
-      await ctx.reply(lines.join("\n\n"));
-      return;
-    }
-
-    const parsed = parseBudgetArg(arg);
-    if (!parsed) {
-      await ctx.reply("Try: /budget 1900  (calories) or /budget 10M (sizes).");
-      return;
-    }
-    db.prepare("UPDATE users SET daily_budget_units = ? WHERE id = ?").run(parsed.units, user.id);
-
-    let msg = `Budget set: ~${formatUnits(parsed.units)} M (≈ ${unitsToKcal(parsed.units)} kcal/day). Exercise earns more back.`;
-    if (floor && unitsToKcal(parsed.units) < floor) {
-      msg += `\n\nHeads up: that's below a safe daily minimum (~${floor} kcal). Fine short-term, but hard to sustain — nudge it up if you feel wiped.`;
-    }
-    await ctx.reply(msg);
+    await replyTurns(ctx, cmdBudget(getOrCreateUser(ctx.from!.id), arg));
   });
 
   bot.on("message:text", async (ctx) => {
@@ -175,41 +103,37 @@ export function createBot(): Bot {
     const user = getOrCreateUser(ctx.from.id);
     const data = ctx.callbackQuery.data;
 
-    const match = data.match(/^e:(\d+):(s:(\w+)|del)$/);
+    const match = data.match(/^e:(\d+):(k:(-?\d+)|del)$/);
     if (!match) {
       await ctx.answerCallbackQuery();
       return;
     }
+    const entryId = Number(match[1]);
     const entry = db
       .prepare("SELECT * FROM entries WHERE id = ? AND user_id = ?")
-      .get(Number(match[1]), user.id) as Entry | undefined;
+      .get(entryId, user.id) as Entry | undefined;
     if (!entry) {
       await ctx.answerCallbackQuery({ text: "Entry no longer exists." });
       return;
     }
 
     if (match[2] === "del") {
-      db.prepare("DELETE FROM entries WHERE id = ?").run(entry.id);
-      await ctx.editMessageText(`❌ ${entry.name} — removed`);
-      await ctx.answerCallbackQuery({ text: tallyLine(computeTally(user)) });
+      const turns = deleteEntry(user, entryId);
+      await ctx.editMessageText(turns[0]?.text.split("\n")[0] ?? `❌ ${entry.name} — removed`);
+      await ctx.answerCallbackQuery({ text: turns[0]?.text.split("\n").slice(1).join(" ") || "removed" });
       return;
     }
 
-    const newSize = match[3];
-    if (!isSize(newSize)) {
-      await ctx.answerCallbackQuery();
-      return;
+    const delta = Number(match[3]);
+    const turns = adjustEntryKcal(user, entryId, delta);
+    const entryTurn = turns.find((t) => t.entry);
+    if (entryTurn?.entry) {
+      await ctx.editMessageText(entryTurn.text, {
+        reply_markup: entryKeyboard(entryTurn.entry.id),
+      });
     }
-    db.prepare("UPDATE entries SET size = ?, kcal_estimate = ? WHERE id = ?").run(
-      newSize, kcalMidFor(newSize), entry.id,
-    );
-    saveOverride(user.id, entry.name, newSize, kcalMidFor(newSize));
-    await ctx.editMessageText(entryLine(entry.kind, entry.name, newSize, null), {
-      reply_markup: entryKeyboard(entry.id, newSize),
-    });
-    await ctx.answerCallbackQuery({
-      text: `${entry.name} = ${newSize}, remembered. ${formatUnits(computeTally(user).remaining)} M left.`,
-    });
+    const note = turns.find((t) => t.kind === "system");
+    await ctx.answerCallbackQuery({ text: note?.text ?? "updated" });
   });
 
   bot.catch((err) => {

@@ -1,10 +1,10 @@
 import { db, getOrCreateUser, dayLocal, normalizeName, type User } from "../db/index.js";
-import { computeTally, formatUnits, currentStreak, todayEntries } from "../domain/tally.js";
+import { computeTally, formatKcal, currentStreak, todayEntries, entryKcal } from "../domain/tally.js";
 import { beginOnboarding, continueOnboarding } from "./onboarding.js";
 import { ingestText, entryLine } from "./ingest.js";
 import {
   cmdHelp, cmdToday, cmdStreak, cmdUndo, cmdBudget,
-  correctEntrySize, deleteEntry,
+  setEntryKcal, adjustEntryKcal, deleteEntry,
 } from "./commands.js";
 import type { BotTurn } from "./turns.js";
 
@@ -15,13 +15,13 @@ export interface SessionSnapshot {
   name: string | null;
   goal: string | null;
   weight_kg: number | null;
-  daily_budget_units: number | null;
+  daily_budget_kcal: number | null;
   streak: number;
   today: {
-    entries: Array<{ id: number; kind: string; name: string; size: string }>;
-    food_units: number;
-    earned_units: number;
-    remaining: number;
+    entries: Array<{ id: number; kind: string; name: string; kcal: number }>;
+    food_kcal: number;
+    earned_kcal: number;
+    remaining_kcal: number;
   };
 }
 
@@ -33,7 +33,6 @@ export class BotSession {
   private userId: number;
 
   constructor(tgUserId?: number) {
-    // Synthetic ids stay far from real Telegram user ids.
     this.tgUserId = tgUserId ?? 9_000_000_000 + Math.floor(Math.random() * 1_000_000_000);
     const user = getOrCreateUser(this.tgUserId);
     this.userId = user.id;
@@ -51,7 +50,8 @@ export class BotSession {
     const user = this.load();
     const trimmed = text.trim();
     if (trimmed.startsWith("/")) {
-      return this.dispatchCommand(trimmed);
+      const handled = this.dispatchCommand(trimmed);
+      if (handled) return handled;
     }
     if (user.onboarding_state === "chat") {
       return continueOnboarding(user, [{ type: "text", text }]);
@@ -70,8 +70,12 @@ export class BotSession {
     }
   }
 
-  correctSize(entryId: number, size: string): BotTurn[] {
-    return correctEntrySize(this.load(), entryId, size);
+  setKcal(entryId: number, kcal: number): BotTurn[] {
+    return setEntryKcal(this.load(), entryId, kcal);
+  }
+
+  adjustKcal(entryId: number, delta: number): BotTurn[] {
+    return adjustEntryKcal(this.load(), entryId, delta);
   }
 
   deleteEntry(entryId: number): BotTurn[] {
@@ -87,37 +91,36 @@ export class BotSession {
       name: user.name,
       goal: user.goal,
       weight_kg: user.weight_kg,
-      daily_budget_units: user.daily_budget_units,
+      daily_budget_kcal: user.daily_budget_units != null ? tally.budgetKcal : null,
       streak: currentStreak(user),
       today: {
         entries: entries.map((e) => ({
-          id: e.id, kind: e.kind, name: e.name, size: e.size,
+          id: e.id, kind: e.kind, name: e.name, kcal: entryKcal(e),
         })),
-        food_units: tally.foodUnits,
-        earned_units: tally.earnedUnits,
-        remaining: tally.remaining,
+        food_kcal: tally.foodKcal,
+        earned_kcal: tally.earnedKcal,
+        remaining_kcal: tally.remainingKcal,
       },
     };
   }
 
-  /** Seed past logging days + weigh-ins so buddy has history to ground on. */
   seedHistory(opts: {
     days: number;
     weight_kg: number;
     weightDeltaPerDay?: number;
-    foodsPerDay?: Array<{ name: string; size: string; kind?: "food" | "exercise" }>;
+    foodsPerDay?: Array<{ name: string; kcal: number; kind?: "food" | "exercise" }>;
   }): void {
     const user = this.load();
     const foods = opts.foodsPerDay ?? [
-      { name: "poha", size: "M" },
-      { name: "dal rice", size: "L" },
-      { name: "chai", size: "S" },
-      { name: "walk", size: "S", kind: "exercise" as const },
+      { name: "poha", kcal: 250 },
+      { name: "dal rice", kcal: 450 },
+      { name: "chai", kcal: 80 },
+      { name: "walk", kcal: 100, kind: "exercise" as const },
     ];
     const insert = db.prepare(
-      `INSERT INTO entries (user_id, kind, name, name_normalized, size, kcal_estimate,
+      `INSERT INTO entries (user_id, kind, name, name_normalized, kcal_estimate,
                             meal_slot, confidence, source, day_local, logged_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'unknown', 'high', 'text', ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, 'unknown', 'high', 'text', ?, ?)`,
     );
     const insertW = db.prepare(
       `INSERT INTO weights (user_id, weight_kg, day_local, measured_at) VALUES (?, ?, ?, ?)`,
@@ -128,10 +131,9 @@ export class BotSession {
       const day = dayLocal(user.tz, date);
       const iso = date.toISOString().replace("T", " ").slice(0, 19);
       for (const f of foods) {
-        const kind = f.kind ?? "food";
         insert.run(
-          user.id, kind, f.name, normalizeName(f.name), f.size,
-          null, day, iso,
+          user.id, f.kind ?? "food", f.name, normalizeName(f.name), f.kcal,
+          day, iso,
         );
       }
       const delta = (opts.weightDeltaPerDay ?? 0) * (opts.days - d);
@@ -139,16 +141,15 @@ export class BotSession {
     }
   }
 
-  /** Format today's entries the way the bot shows them (for SimUser context). */
   formatToday(): string {
     const user = this.load();
     const entries = todayEntries(user);
     if (entries.length === 0) return "(nothing logged today)";
-    return entries.map((e) => entryLine(e.kind, e.name, e.size, null)).join("\n") +
-      `\n${formatUnits(computeTally(user).remaining)} M left`;
+    return entries.map((e) => entryLine(e.kind, e.name, entryKcal(e), null)).join("\n") +
+      `\n${formatKcal(computeTally(user).remainingKcal)} kcal left`;
   }
 
-  private dispatchCommand(raw: string): BotTurn[] {
+  private dispatchCommand(raw: string): BotTurn[] | null {
     const [cmd, ...rest] = raw.slice(1).split(/\s+/);
     const arg = rest.join(" ");
     const user = this.load();
@@ -159,8 +160,7 @@ export class BotSession {
       case "streak": return cmdStreak(user);
       case "undo": return cmdUndo(user);
       case "budget": return cmdBudget(user, arg);
-      default:
-        return [{ text: `Unknown command /${cmd}. Try /help.`, kind: "system" }];
+      default: return null;
     }
   }
 }

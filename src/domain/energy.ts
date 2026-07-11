@@ -16,7 +16,8 @@ export const ACTIVITY_FACTOR: Record<Activity, number> = {
   active: 1.725,
 };
 
-export const KCAL_PER_UNIT = 200; // 1 budget unit = one M
+export const KCAL_PER_UNIT = 200; // internal storage: 1 daily_budget_unit ≈ 200 kcal
+
 const KCAL_PER_KG_FAT = 7700; // energy in a kg of body fat
 const MAX_WEEKLY_LOSS_FRACTION = 0.01; // ≤ 1% bodyweight/week (SPEC §7)
 

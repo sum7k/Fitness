@@ -6,7 +6,6 @@ export interface ExtractedEntry {
   name: string;
   quantity_hint: string | null;
   kcal_estimate: number;
-  size: "XS" | "S" | "M" | "L" | "XL" | "XXL" | "XXXL";
   confidence: "high" | "low";
   meal_slot: "breakfast" | "lunch" | "dinner" | "snack" | "unknown";
 }
@@ -35,7 +34,6 @@ const EXTRACTION_SCHEMA = {
           name: { type: "string" },
           quantity_hint: { type: ["string", "null"] },
           kcal_estimate: { type: "number" },
-          size: { type: "string", enum: ["XS", "S", "M", "L", "XL", "XXL", "XXXL"] },
           confidence: { type: "string", enum: ["high", "low"] },
           meal_slot: {
             type: "string",
@@ -44,7 +42,7 @@ const EXTRACTION_SCHEMA = {
         },
         required: [
           "kind", "name", "quantity_hint", "kcal_estimate",
-          "size", "confidence", "meal_slot",
+          "confidence", "meal_slot",
         ],
       },
     },
@@ -56,17 +54,17 @@ const EXTRACTION_SCHEMA = {
 
 const SYSTEM_PROMPT = `You process input for a fitness logging bot. Input is text, a voice recording, or a food photo from one user. Extract what they ate, what exercise they did, any body-weight mention, and anything addressed to the bot as conversation.
 
-SIZE SCALE (t-shirt sizes, anchored to rough kcal):
-XS≈50, S≈100, M≈200, L≈400, XL≈600, XXL≈800, XXXL≈1200+
-- Size the TOTAL quantity mentioned: 1 roti ≈ S, 2 rotis ≈ M. A bowl of dal ≈ M. Restaurant biryani plate ≈ L.
-- When torn between two sizes: food rounds UP, exercise rounds DOWN.
-- kcal_estimate is your honest rough estimate for the total quantity; size must be consistent with it.
+CALORIES:
+- kcal_estimate is a rough honest estimate for the TOTAL quantity mentioned (1 roti ≈ 100, 2 rotis ≈ 200, bowl of dal ≈ 200, restaurant biryani plate ≈ 600–800).
+- Round to a sensible number (nearest 10–25 is fine). Prefer slightly high for food, slightly low for exercise when unsure.
 - Exercise kcal: estimate for the stated duration/intensity assuming an average adult; walking casually ≈ 200-250 kcal/hour, jogging ≈ 500/hour, gym session ≈ 400-500/hour.
 
 RULES:
 - intent "log": only food/exercise/steps. "weight": only a weigh-in. "chat": a question or remark addressed to the bot. "mixed": log/weigh plus a question — fill both entries and chat_text.
+- ONE ENTRY PER FOOD: split combined mentions — "2 roti, sabzi aur dal" → three entries (roti, sabzi, dal). Never produce an entry name that joins foods with "and"/commas/"with" ("dal roti sabzi", "chai with namkeen" are wrong). Keep a single entry only for a genuinely single named dish (idli sambar, chole bhature, pav bhaji).
+- ALREADY LOGGED TODAY: the user message may include a list of items already logged today. If the user refers to one of those again — correcting calories ("that biryani was more like 800"), saying it was bigger/smaller, mentioning it in passing ("before the dal"), or asking about it — that is intent "chat" (put the remark in chat_text), NOT a new entry. Only log genuinely new eating/exercise events.
 - Whole-day narrations produce many entries; infer meal_slot from words like morning/lunch/evening, else "unknown".
-- Steps count as exercise: "walked 8000 steps" → exercise "walking (8000 steps)", ≈ 280 kcal → M.
+- Steps count as exercise: "walked 8000 steps" → exercise "walking (8000 steps)", ≈ 280 kcal.
 - Weigh-ins: "weighed 82", "82.4 kg today" → weight_kg. Never create an entry for it.
 - Keep native/vernacular dish names as spoken (poha, dal, dosa, chai). Hinglish is common — transcribe faithfully.
 - For photos: identify the dish(es) and portion from what is visible; confidence "low" unless obvious.
@@ -74,18 +72,26 @@ RULES:
 - transcript: verbatim transcription for audio; for text input echo the text; for photos a one-line description.
 - Non-food, non-fitness input with no question → intent "chat", chat_text = the input; entries empty.`;
 
+
 type InputPart =
   | { type: "text"; text: string }
   | { type: "input_audio"; input_audio: { data: string; format: "mp3" | "wav" } }
   | { type: "image_url"; image_url: { url: string } };
 
-export async function extract(parts: InputPart[], localTimeHint: string): Promise<Extraction> {
+export async function extract(
+  parts: InputPart[],
+  localTimeHint: string,
+  alreadyLoggedToday: string[] = [],
+): Promise<Extraction> {
+  const loggedNote = alreadyLoggedToday.length
+    ? `\nAlready logged today (re-mentions of these are chat, not new entries): ${alreadyLoggedToday.join(", ")}`
+    : "";
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
     {
       role: "user",
       content: [
-        { type: "text", text: `User's local time: ${localTimeHint}` },
+        { type: "text", text: `User's local time: ${localTimeHint}${loggedNote}` },
         ...parts,
       ],
     },

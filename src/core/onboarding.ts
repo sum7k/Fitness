@@ -1,5 +1,5 @@
 import { db, type User } from "../db/index.js";
-import { formatUnits } from "../domain/tally.js";
+import { formatKcal } from "../domain/tally.js";
 import {
   baseEnergy, budgetFor, bmi, clampRateKgWk, rateToDailyAdjust, paceToRate, hasEnergyProfile,
   type Sex, type Activity, type Pace,
@@ -10,7 +10,7 @@ import {
 import type { BotTurn } from "./turns.js";
 
 const OPENING =
-  "Hey! I'm your food-and-movement sidekick — no calorie counting, no forms. You just tell me what you eat and do, and I track it in simple sizes.\n\n" +
+  "Hey! I'm your food-and-movement sidekick — no forms, no fuss. You tell me what you eat and do, and I estimate the calories.\n\n" +
   "To set you up, tell me a bit about yourself and what you're after — your weight, height, age, how your usual day goes, and your goal. Talk or type, whatever's easy.";
 
 export function beginOnboarding(user: User): BotTurn[] {
@@ -48,7 +48,7 @@ export async function continueOnboarding(
     db.prepare("UPDATE users SET pending_rate = ? WHERE id = ?").run(rate, fresh.id);
     const budget = computeBudget(fresh, rate);
     reply +=
-      `\n\n(≈ ${formatUnits(budget.units)} M a day — one M is about a normal bowl of food, and exercise earns more back.` +
+      `\n\n(≈ ${formatKcal(budget.target)} kcal a day — rough estimates, and exercise earns some back.` +
       (budget.floored ? " I've held it at a safe daily minimum." : "") +
       `)`;
   } else if (turn.stage === "confirmed" && complete && fresh.pending_rate != null) {
@@ -56,7 +56,7 @@ export async function continueOnboarding(
     db.prepare(
       "UPDATE users SET daily_budget_units = ?, pace = ?, onboarding_state = NULL, pending_rate = NULL WHERE id = ?",
     ).run(budget.units, rateLabel(fresh.pending_rate), fresh.id);
-    reply += "\n\n" + doneFooter(budget.units, fresh.name);
+    reply += "\n\n" + doneFooter(budget.target, fresh.name, budget.floored);
   }
 
   logChat(user.id, "assistant", reply);
@@ -116,9 +116,13 @@ function rateLabel(rateKgWk: number): string {
   return `${rateKgWk > 0 ? "+" : ""}${rateKgWk}kg/wk`;
 }
 
-function doneFooter(units: number, name: string | null): string {
+function doneFooter(targetKcal: number, name: string | null, floored = false): string {
   return (
-    `You're all set${name ? `, ${name}` : ""} — daily budget about ${formatUnits(units)} M. Think of an M as a normal bowl of food (~a dal-rice bowl).\n\n` +
+    `You're all set${name ? `, ${name}` : ""} — daily budget about ${formatKcal(targetKcal)} kcal.\n` +
+    (floored
+      ? `(That's the safe daily minimum for you — a more aggressive pace wouldn't lower it further; the extra progress comes from movement instead.)\n`
+      : "") +
+    `\n` +
     `Now just tell me things, any time:\n` +
     `🎤 voice: "had poha and chai for breakfast"\n` +
     `⌨️ text: "2 rotis with dal, then walked 20 min"\n` +
