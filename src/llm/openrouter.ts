@@ -11,6 +11,22 @@ export interface ChatMessage {
   content: string | ContentPart[];
 }
 
+export type OpenRouterTool = {
+  type: "openrouter:web_search";
+  parameters?: {
+    engine?: "auto" | "native" | "exa" | "firecrawl" | "parallel" | "perplexity";
+    max_results?: number;
+    max_total_results?: number;
+    search_context_size?: "low" | "medium" | "high";
+  };
+};
+
+export type OpenRouterPlugin = {
+  id: "web";
+  engine?: "native" | "exa" | "firecrawl" | "parallel" | "perplexity";
+  max_results?: number;
+};
+
 class TransientLlmError extends Error {}
 
 export async function chat(opts: {
@@ -20,6 +36,10 @@ export async function chat(opts: {
   maxTokens?: number;
   /** Disable hidden thinking on reasoning models (Gemini 2.5, etc.) so content isn't empty. */
   reasoning?: false;
+  /** Server tools (e.g. openrouter:web_search) — model decides when to call. */
+  tools?: OpenRouterTool[];
+  /** Legacy plugins; web plugin always searches once (useful when code already decided to look up). */
+  plugins?: OpenRouterPlugin[];
 }): Promise<string> {
   const body: Record<string, unknown> = {
     model: opts.model,
@@ -35,6 +55,8 @@ export async function chat(opts: {
   if (opts.reasoning === false) {
     body.reasoning = { enabled: false };
   }
+  if (opts.tools?.length) body.tools = opts.tools;
+  if (opts.plugins?.length) body.plugins = opts.plugins;
 
   // Providers occasionally die mid-generation (200 + truncated content + zeroed
   // usage) or rate-limit; both are transient, so retry those and only those.
@@ -52,7 +74,7 @@ export async function chat(opts: {
 }
 
 async function chatOnce(
-  opts: { model: string; jsonSchema?: { name: string } },
+  opts: { model: string; jsonSchema?: { name: string }; tools?: OpenRouterTool[]; plugins?: OpenRouterPlugin[] },
   body: Record<string, unknown>,
 ): Promise<string> {
   const started = Date.now();
@@ -73,14 +95,25 @@ async function chatOnce(
   }
   const json = (await res.json()) as {
     choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
-    usage?: { prompt_tokens?: number; completion_tokens?: number };
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      server_tool_use?: { web_search_requests?: number };
+    };
     error?: { message?: string };
   };
   const finish = json.choices?.[0]?.finish_reason;
+  const searches = json.usage?.server_tool_use?.web_search_requests;
+  const extras = [
+    opts.tools?.length ? "tools" : null,
+    opts.plugins?.length ? "plugins" : null,
+    searches != null ? `web=${searches}` : null,
+  ].filter(Boolean);
   debug(
     `llm ${opts.model}${opts.jsonSchema ? ` (${opts.jsonSchema.name})` : ""}: ` +
       `${((Date.now() - started) / 1000).toFixed(1)}s, ` +
       `tokens ${json.usage?.prompt_tokens ?? "?"}→${json.usage?.completion_tokens ?? "?"}` +
+      (extras.length ? `, ${extras.join(",")}` : "") +
       (finish && finish !== "stop" ? `, finish=${finish}` : ""),
   );
   if (json.error) {
@@ -93,6 +126,7 @@ async function chatOnce(
   if (finish && finish !== "stop") {
     // "error" = provider died mid-stream (retryable); "length" = truncated at
     // max_tokens — retry anyway, sampling variance usually fits on a second pass.
+    // Tool-calling intermediate finishes shouldn't appear for OpenRouter server tools.
     throw new TransientLlmError(`OpenRouter finish_reason=${finish}, content likely truncated`);
   }
   return content;
