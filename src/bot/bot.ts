@@ -1,6 +1,7 @@
 import { Bot } from "grammy";
 import { config } from "../config.js";
 import { db, getOrCreateUser, type Entry } from "../db/index.js";
+import { accessGate, codeMatches } from "./access.js";
 import { startOnboarding, handleOnboarding } from "./onboarding.js";
 import type { OnboardInputPart } from "../llm/onboard.js";
 import { ingest, voiceToParts, photoToParts, entryKeyboard, replyTurns } from "./ingest.js";
@@ -14,7 +15,13 @@ export function createBot(): Bot {
   if (!config.botToken) {
     throw new Error("Missing env var: TELEGRAM_BOT_TOKEN");
   }
+  if (!config.accessCode) {
+    throw new Error("Missing env var: BOT_ACCESS_CODE");
+  }
   const bot = new Bot(config.botToken);
+
+  // Before any command/ingest — whitelist or access code only; no LLM.
+  bot.use(accessGate);
 
   bot.use(async (ctx, next) => {
     const m = ctx.message;
@@ -23,7 +30,7 @@ export function createBot(): Bot {
       : m?.photo
         ? `photo${m.caption ? ` caption="${m.caption.slice(0, 60)}"` : ""}`
         : m?.text
-          ? `text "${m.text.slice(0, 80)}"`
+          ? `text "${codeMatches(m.text) ? "[access code]" : m.text.slice(0, 80)}"`
           : ctx.callbackQuery
             ? `callback ${ctx.callbackQuery.data}`
             : "other update";

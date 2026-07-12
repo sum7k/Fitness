@@ -17,6 +17,7 @@ Create a `.env` (or symlink one) with:
 ```bash
 TELEGRAM_BOT_TOKEN=...      # from @BotFather
 OPENROUTER_API_KEY=...
+BOT_ACCESS_CODE=...         # shared invite code; rotate anytime (exact match)
 
 # Optional overrides
 # MODEL_CHEAP=google/gemini-2.5-flash
@@ -25,6 +26,8 @@ OPENROUTER_API_KEY=...
 # DB_PATH=data/fitness.db
 # DEFAULT_TZ=Asia/Kolkata
 ```
+
+New users must send the access code before the bot will log or chat (no LLM calls until then). Changing `BOT_ACCESS_CODE` rotates the invite; already-whitelisted users stay in. Existing DB users are grandfathered on startup.
 
 Voice notes need `ffmpeg` on your PATH.
 

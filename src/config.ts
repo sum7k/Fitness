@@ -23,4 +23,6 @@ export const config = {
   modelSimUser: process.env.MODEL_SIM_USER ?? "google/gemini-2.5-flash",
   dbPath: process.env.DB_PATH ?? "data/fitness.db",
   defaultTimezone: process.env.DEFAULT_TZ ?? "Asia/Kolkata",
+  /** Shared invite code; rotate anytime. Empty = gate disabled (sim/dev only). */
+  accessCode: (process.env.BOT_ACCESS_CODE ?? "").trim(),
 };

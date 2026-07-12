@@ -73,6 +73,17 @@ CREATE TABLE IF NOT EXISTS chat_log (
   text TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS allowed_users (
+  tg_user_id INTEGER PRIMARY KEY,
+  allowed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+
+// Existing DB users stay in after the gate is turned on.
+db.exec(`
+INSERT OR IGNORE INTO allowed_users (tg_user_id)
+SELECT tg_user_id FROM users
 `);
 
 // ---- migrations for older DBs ----
